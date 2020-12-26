@@ -41,134 +41,83 @@
 #include <time.h>
 #include <signal.h>
 
-using namespace aditof;
+#include <sys/stat.h> 
+#include <sys/types.h> 
 
-cv::VideoWriter outvideo;
+#include "aditof_utils.h"
 
-std::string getTimeString()
-{
-    time_t unixTime = time(NULL);
-    struct tm *locTime = localtime(&unixTime);
-
-    std::string str;
-
-    str = std::to_string(locTime->tm_year - 100);
-
-    if ((locTime->tm_mon+1) < 10) str += "0";
-    str += std::to_string(locTime->tm_mon + 1);
-
-    if (locTime->tm_mday < 10) str += "0";
-    str += std::to_string(locTime->tm_mday);
-
-    str += "_";
-
-    if (locTime->tm_hour < 10) str += "0";
-    str += std::to_string(locTime->tm_hour);
-
-    if (locTime->tm_min < 10) str += "0";
-    str += std::to_string(locTime->tm_min);
-
-    if (locTime->tm_sec < 10) str += "0";
-    str += std::to_string(locTime->tm_sec);
-
-    return str;
-}
+int halt_flag;
 
 static void exit_handler(int s)
 {
     LOG(ERROR) << "Caught signal " << s;
+    
+    halt_flag = 1;
 
-	//outvideo.release();
-
-    exit(1);
 }
 
-int main(int argc, char *argv[]) {
-
-    google::InitGoogleLogging(argv[0]);
-    FLAGS_alsologtostderr = 1;
-
-
-	struct sigaction sigIntHandler;
+int main(int argc, char *argv[]) 
+{
+    
+    struct sigaction sigIntHandler;
     sigIntHandler.sa_handler = exit_handler;
     sigemptyset(&sigIntHandler.sa_mask);
     sigIntHandler.sa_flags = 0;
     sigaction(SIGINT, &sigIntHandler, NULL);
 
-    Status status = Status::OK;
+    aditof::Status status = aditof::Status::OK;
+    halt_flag = 0;
+    cv::VideoWriter outvideo;
     
-    System system;
-    status = system.initialize();
-    if (status != Status::OK) {
-        LOG(ERROR) << "Could not initialize system!";
-        return 0;
-    }
+    std::shared_ptr<aditof::Camera> camera = initCamera(argc, argv);
+    
+    setCameraRevision(camera, "RevB");
+    
+    /*
+     * Available frameTypes
+     * depth_ir, depth_only, ir_only, raw
+     * */
+    setFrameType(camera, "depth_only");
+    
+    /*
+     * Available modes
+     * near, medium, far, custom
+     * */
+    std::string mode = "medium";
+    setMode(camera, mode);
 
-    std::vector<std::shared_ptr<Camera>> cameras;
-    system.getCameraList(cameras);
-    if (cameras.empty()) {
-        LOG(WARNING) << "No cameras found";
-        return 0;
-    }
-
-    auto camera = cameras.front();
-    status = camera->initialize();
-    if (status != Status::OK) {
-        LOG(ERROR) << "Could not initialize camera!";
-        return 0;
-    }
-
-    std::vector<std::string> frameTypes;
-    camera->getAvailableFrameTypes(frameTypes);
-    if (frameTypes.empty()) {
-        std::cout << "no frame type avaialble!";
-        return 0;
-    }
-    status = camera->setFrameType(frameTypes.front());
-    if (status != Status::OK) {
-        LOG(ERROR) << "Could not set camera frame type!";
-        return 0;
-    }
-
-    std::vector<std::string> modes;
-    camera->getAvailableModes(modes);
-    if (modes.empty()) {
-        LOG(ERROR) << "no camera modes available!";
-        return 0;
-    }
-    status = camera->setMode(modes.front());
-    if (status != Status::OK) {
-        LOG(ERROR) << "Could not set camera mode!";
-        return 0;
-    }
-
+    /*
+     * Retrieve FrameDetails
+     * */
     aditof::Frame frame;
+    getNewFrame(camera, &frame);
     
-    status = camera->requestFrame(&frame);
-	if (status != Status::OK) {
-		LOG(ERROR) << "Could not request frame!";
-		return 0;
-	} else {
-		//LOG(INFO) << "succesfully requested frame!"; 
-	}
+    aditof::FrameDetails fDetails;
+    frame.getDetails(fDetails);
 
-	FrameDetails fDetails;
-	frame.getDetails(fDetails);
-	
-	int frameHeight = static_cast<int>(fDetails.height) / 2;
-	int frameWidth = static_cast<int>(fDetails.width);
-	int currentFrame;
-	int rangeMax = 1200;
-	int rangeMin = 500;
+    int frameHeight = static_cast<int>(fDetails.height);
+    int frameWidth = static_cast<int>(fDetails.width);
+    int currentFrame;
+    int rangeMax = getRangeMax(camera);
+    int rangeMin = getRangeMin(camera);
     
-    std::string timestamp_str = getTimeString();
+    std::string dir = getTimeString() + "_" + mode;
     
-    outvideo.open(timestamp_str + "_orig.avi", 
-					CV_FOURCC('X','V','I','D'), 
-					15.0, 
-					cv::Size(frameWidth, frameHeight), 
-					true);
-					
+    if (0 > mkdir(dir.c_str(), 0777) ) 
+    {
+        LOG(ERROR) << "Error :  " << strerror(errno) << std::endl; 
+    }
+    else
+    {
+        LOG(INFO) << "Directory " + dir +" created"; 
+    }
+    
+    outvideo.open(  dir + "/video_orig.avi", 
+                    CV_FOURCC('X','V','I','D'), 
+                    15.0, 
+                    cv::Size(frameWidth, frameHeight), 
+                    true);
+                
     if (!outvideo.isOpened())
     {
         LOG(ERROR) << "Error opening outvideo video";
@@ -177,53 +126,39 @@ int main(int argc, char *argv[]) {
     
     currentFrame = 0;
     
-    while(1)
+    while(0 == halt_flag)
     {
 
-		status = camera->requestFrame(&frame);
-		if (status != Status::OK) {
-			LOG(ERROR) << "Could not request frame!";
-			return 0;
-		} else {
-			//LOG(INFO) << "succesfully requested frame!"; 
-		}
+        getNewFrame(camera, &frame);
+        
+        uint16_t *frameData = getFrameData(&frame, aditof::FrameDataType::DEPTH);
+        if (!frameData) 
+        {
+            LOG(ERROR) << "getFrameData call failed";
+            return (-1);
+        }
 
-		uint16_t *data;
-		status = frame.getData(FrameDataType::RAW, &data);
+        std::ofstream outbin (dir + "/" + std::to_string(currentFrame) + ".bin");
+        
+        cv::Mat m_depthImage = cv::Mat(cv::Size(frameWidth, frameHeight), CV_16UC1, frameData);
+             
+        outbin.write( (char*) m_depthImage.data, 
+                    m_depthImage.elemSize() * m_depthImage.total());
+        
+        m_depthImage.convertTo(
+                m_depthImage, CV_8U,
+                (255.0 / (rangeMax - rangeMin)),
+                (-(255.0 / (rangeMax - rangeMin)) * rangeMin));
+        
+        cv::applyColorMap(m_depthImage, m_depthImage, cv::COLORMAP_RAINBOW);
+        cv::flip(m_depthImage, m_depthImage, 1);
 
-		if (status != Status::OK) {
-			LOG(ERROR) << "Could not get frame data!";
-			return 0;
-		}
-
-		if (!data) {
-			LOG(ERROR) << "no memory allocated in frame";
-			return 0;
-		}
-	
-		std::ofstream outbin (timestamp_str + "_" + std::to_string(currentFrame) + ".bin");
-		
-		cv::Mat m_depthImage = cv::Mat(cv::Size(frameWidth, frameHeight), CV_16UC1, data);
-			 
-		outbin.write( (char*) m_depthImage.data, 
-					m_depthImage.elemSize() * m_depthImage.total());
-		
-		m_depthImage.convertTo(
-				m_depthImage, CV_8U,
-				(255.0 / (rangeMax - rangeMin)),
-				(-(255.0 / (rangeMax - rangeMin)) * rangeMin));
-		
-		cv::applyColorMap(m_depthImage, m_depthImage, cv::COLORMAP_RAINBOW);
-		cv::flip(m_depthImage, m_depthImage, 1);
-
-		//cv::imshow( "TEST", m_depthImage);
-		outvideo << m_depthImage;
-		
-		currentFrame++;
-		outbin.close();
-		
-		//cv::waitKey(1);
-	}
+        //cv::imshow( "TEST", m_depthImage);
+        outvideo << m_depthImage;
+        
+        currentFrame++;
+        outbin.close();
+    }
 
     return 0;
 }
