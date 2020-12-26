@@ -46,6 +46,8 @@
 
 #include "aditof_utils.h"
 
+//#define DEBUG_VIDEO
+
 int halt_flag;
 
 static void exit_handler(int s)
@@ -67,15 +69,21 @@ int main(int argc, char *argv[])
 
     aditof::Status status = aditof::Status::OK;
     halt_flag = 0;
+#ifdef DEBUG_VIDEO
     cv::VideoWriter outvideo;
-    
+#endif
     std::shared_ptr<aditof::Camera> camera = initCamera(argc, argv);
     
+    /*
+     * ADI ToF board revision
+     * RevB, RevC
+     * */
     setCameraRevision(camera, "RevB");
     
     /*
      * Available frameTypes
      * depth_ir, depth_only, ir_only, raw
+     * If depth_ir is choosen, frameHeight will be doubled!
      * */
     setFrameType(camera, "depth_only");
     
@@ -111,24 +119,28 @@ int main(int argc, char *argv[])
     {
         LOG(INFO) << "Directory " + dir +" created"; 
     }
-    
+
+#ifdef DEBUG_VIDEO
     outvideo.open(  dir + "/video_orig.avi", 
                     CV_FOURCC('X','V','I','D'), 
                     15.0, 
                     cv::Size(frameWidth, frameHeight), 
                     true);
-                
+
     if (!outvideo.isOpened())
     {
         LOG(ERROR) << "Error opening outvideo video";
         return 0;
     }
-    
+#endif  
     currentFrame = 0;
+    
+    time_t start, end;
+    time(&start);
     
     while(0 == halt_flag)
     {
-
+        
         getNewFrame(camera, &frame);
         
         uint16_t *frameData = getFrameData(&frame, aditof::FrameDataType::DEPTH);
@@ -144,19 +156,26 @@ int main(int argc, char *argv[])
              
         outbin.write( (char*) m_depthImage.data, 
                     m_depthImage.elemSize() * m_depthImage.total());
-        
+#ifdef DEBUG_VIDEO
         m_depthImage.convertTo(
                 m_depthImage, CV_8U,
                 (255.0 / (rangeMax - rangeMin)),
                 (-(255.0 / (rangeMax - rangeMin)) * rangeMin));
         
-        cv::applyColorMap(m_depthImage, m_depthImage, cv::COLORMAP_RAINBOW);
-        cv::flip(m_depthImage, m_depthImage, 1);
+        cv::applyColorMap(m_depthImage, m_depthImage, cv::COLORMAP_JET);
 
-        //cv::imshow( "TEST", m_depthImage);
         outvideo << m_depthImage;
-        
+#endif
         currentFrame++;
+        
+        if ((currentFrame % 50) == 0)
+        {
+            time(&end);
+            double seconds = difftime (end, start);
+            LOG(INFO) << "FPS : " << 50.0 / seconds;
+            time(&start);
+        }
+        
         outbin.close();
     }
 
